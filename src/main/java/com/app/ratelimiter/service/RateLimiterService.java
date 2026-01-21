@@ -6,7 +6,7 @@ import org.springframework.stereotype.Service;
 @Service
 @RequiredArgsConstructor
 public class RateLimiterService {
-    public final RedisTokenBucketService redisTokenBucketService;
+    private final RedisTokenBucketService redisTokenBucketService;
 
     public boolean isAllowed(String clientId){
         return redisTokenBucketService.isAllowed(clientId);

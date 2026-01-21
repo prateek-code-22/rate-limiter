@@ -34,8 +34,6 @@ public class StatusController {
     public Mono<ResponseEntity<Map<String, Object>>> getRateLimitStatus(ServerWebExchange exchange) {
         String clientId = getClientId(exchange);
         return Mono.just(ResponseEntity.ok(Map.of(
-                "Status", "UP",
-                "service", "rate-limiting-gateway",
                 "clientId", clientId,
                 "capacity", rateLimiterService.getCapacity(clientId),
                 "availableTokens", rateLimiterService.getAvailableTokens(clientId)

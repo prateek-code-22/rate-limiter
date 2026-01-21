@@ -1,113 +1,91 @@
 package com.app.ratelimiter.service;
+
 import com.app.ratelimiter.config.RateLimiterProperties;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
-
-//store token bucket state in redis
-//manage tokens per client
-//handles token refill based on time
-//provide rate limiting logic
+import java.util.List;
 
 @Service
-@RequiredArgsConstructor //creates a constructor for final fields
+@RequiredArgsConstructor
 public class RedisTokenBucketService {
 
     private final JedisPool jedisPool;
     private final RateLimiterProperties properties;
 
-    //prefix to avoid collision
-    private final String TOKENS_KEY_PREFIX = "rate-limiter:tokens:";
-    private static final String LAST_REFILL_KEY_PREFIX = "rate-limiter:last_refill:";
+    private static final String TOKENS_KEY_PREFIX = "rate_limiter:tokens:";
+    private static final String LAST_REFILL_KEY_PREFIX = "rate_limiter:last_refill:";
 
-    //Pattern
-    //rate_limiter:{type}:{clientId}
-    //ex: rate_limiter:tokens:192.164.2.35 - "7" (current token count left)
-    //    rate_limiter:las_refill:192.164.35.66 - "12345678" (last refill timestamp)
+    //ATOMIC LUA SCRIPT
+    private static final String LUA_SCRIPT = """
+        local tokens_key = KEYS[1]
+        local last_refill_key = KEYS[2]
 
+        local capacity = tonumber(ARGV[1])
+        local refill_rate = tonumber(ARGV[2])
+        local now = tonumber(ARGV[3])
 
-    public boolean isAllowed(String clientId){
-        String tokenKey = TOKENS_KEY_PREFIX + clientId;
+        local tokens = tonumber(redis.call('get', tokens_key))
+        local last_refill = tonumber(redis.call('get', last_refill_key))
 
-        // “Borrow Redis connection → use → return to pool”
-        try(Jedis jedis = jedisPool.getResource()){
-            refillTokens(clientId, jedis);
+        if tokens == nil then
+            tokens = capacity
+        end
 
-            //no of token left
-            String tokenStr = jedis.get(tokenKey);
+        if last_refill == nil then
+            last_refill = now
+        end
 
-            // Redis already has token count → use it ,If first request → give full bucket
-//            long currentTokens = tokenStr != null ? Long.parseLong(tokenStr): properties.getCapacity();
-//
-//            // token count less than required
-//            if(currentTokens <= 0) return false;
-//
-//            //decrement by 1 assuming request require 1 token
-//            long decremented = jedis.decr(tokenKey);
-//
-//            //should not be negative
-//            return decremented >= 0;
+        local elapsed = now - last_refill
+        local refill = math.floor((elapsed * refill_rate) / 1000)
 
+        if refill > 0 then
+            tokens = math.min(capacity, tokens + refill)
+            redis.call('set', last_refill_key, now)
+        end
 
-            long currentTokens = tokenStr != null ? Long.parseLong(tokenStr) : properties.getCapacity();
+        if tokens <= 0 then
+            redis.call('set', tokens_key, tokens)
+            return 0
+        end
 
-            if(currentTokens <= 0) {
-                return false;
-            }
+        tokens = tokens - 1
+        redis.call('set', tokens_key, tokens)
+        redis.call('set', last_refill_key, now)
 
-            long decremented = jedis.decr(tokenKey);
-            return decremented >= 0;
+        return 1
+        """;
+
+    public boolean isAllowed(String clientId) {
+
+        String tokensKey = TOKENS_KEY_PREFIX + clientId;
+        String lastRefillKey = LAST_REFILL_KEY_PREFIX + clientId;
+
+        try (Jedis jedis = jedisPool.getResource()) {
+
+            Object result = jedis.eval(
+                    LUA_SCRIPT,
+                    List.of(tokensKey, lastRefillKey),
+                    List.of(
+                            String.valueOf(properties.getCapacity()),
+                            String.valueOf(properties.getRefillRate()),
+                            String.valueOf(System.currentTimeMillis())
+                    )
+            );
+
+            return Long.valueOf(1).equals(result);
         }
     }
 
-    public long getCapacity(String clientId){
+    public long getCapacity(String clientId) {
         return properties.getCapacity();
     }
 
-    public long getAvailableTokens(String clientId){
-        String tokenKey = TOKENS_KEY_PREFIX + clientId;
-
-        try(Jedis jedis = jedisPool.getResource()){
-            refillTokens(clientId, jedis);
-            String tokenStr = jedis.get(tokenKey);
-            return tokenStr != null ? Long.parseLong(tokenStr) : properties.getCapacity();
-
+    public long getAvailableTokens(String clientId) {
+        try (Jedis jedis = jedisPool.getResource()) {
+            String val = jedis.get(TOKENS_KEY_PREFIX + clientId);
+            return val != null ? Long.parseLong(val) : properties.getCapacity();
         }
     }
-
-    public void refillTokens(String clientId, Jedis jedis) {
-
-        String tokenKey = TOKENS_KEY_PREFIX + clientId;
-        String lastRefillKey = LAST_REFILL_KEY_PREFIX + clientId;
-
-        long now = System.currentTimeMillis();
-        String lastRefillStr = jedis.get(lastRefillKey);
-
-        //if bucket is empty
-        if(lastRefillStr == null){
-            jedis.set(tokenKey, String.valueOf(properties.getCapacity()));
-            jedis.set(lastRefillKey, String.valueOf(now));
-            return;
-        }
-
-        long lastRefillTime = Long.parseLong(lastRefillStr);
-        long elapsedTime = now - lastRefillTime;
-
-        if(elapsedTime <= 0) return;
-
-        //elapsed time in msec, refillrate - token/sec
-        long tokenToAdd = (elapsedTime * properties.getRefillRate()) / 1000;
-        if(tokenToAdd <= 0) return;
-
-        String tokenStr = jedis.get(tokenKey);
-        long currentTokens = tokenStr != null ? Long.parseLong(tokenStr): properties.getCapacity();
-        long newTokens = Math.min(properties.getCapacity(), currentTokens + tokenToAdd );
-
-        jedis.set(tokenKey, String.valueOf(newTokens));
-        jedis.set(lastRefillKey, String.valueOf(now));
-
-    }
-
 }
-
