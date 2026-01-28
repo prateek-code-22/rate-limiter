@@ -31,7 +31,7 @@ public class GatewayConfig {
                                 .stripPrefix(1)
                                 .filter(tokenBucketRateLimiterFilter.apply(new TokenBucketRateLimiterFilter.Config()))
                         )
-                        .uri(rateLimiterProperties.getApiServerUrl))
+                        .uri(rateLimiterProperties.getApiServerUrl()))
                 .build();
     }
 
